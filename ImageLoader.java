@@ -1,4 +1,4 @@
-package com.robot.imageLoader;
+package com.apicloud.photoBrowser_toutiao;
 
 import java.io.ByteArrayOutputStream;
 import java.io.File;
@@ -15,6 +15,9 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+
+import javax.net.ssl.HttpsURLConnection;
+
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Bitmap.CompressFormat;
@@ -28,48 +31,63 @@ import android.util.Log;
 import android.util.LruCache;
 import android.view.View;
 import android.widget.ImageView;
-
+import android.widget.ProgressBar;
 /**
- * 
  * @author Robot
- * 
  */
-
 public class ImageLoader {
-	
+
 	public static final String TAG = "lyh";
-	
+
 	/**
-	 *  the max size of the cache
+	 * the max size of the cache
 	 */
-	public static int MAX_CACHE_SIZE = (int) Runtime.getRuntime().maxMemory() / 8;
-	
+	public static int MAX_CACHE_SIZE = (int) Runtime.getRuntime().maxMemory() / 6;
+
 	/**
 	 * the path of the cache
 	 */
-	public static String CACHE_PATH = Environment.getExternalStorageDirectory() + "/.image";
-	
+	private String CACHE_PATH = Environment.getExternalStorageDirectory()
+			+ "/.image";
+
 	/**
 	 * the number of concurrent threads
 	 */
 	public static int THREAD_NUMS = 3;
-	
+
 	/**
 	 * read buffer size
 	 */
 	public static final int BUF_SIZE = 1024;
-	
+
 	/**
 	 * cached image format
 	 */
 	public static final String CACHED_IMAGE_FORMAT = ".jpg";
+
+	/**
+	 * sample flag (avoid OOM, just applies to local image file)
+	 */
+	public static boolean SAMPLED_FLAG = true;
+
+	/**
+	 * placeholder image path;
+	 */
+	public Bitmap placeHolderBmp;
 	
 	/**
-	 * sample flag (for avoid OOM, applies only to local file)
+	 * connect timeout
 	 */
-	public static final boolean SAMPLED_FLAG = false;
+	public static final int TIME_OUT = 3000;
+	
+	public ImageLoader(){}
+	
+	public ImageLoader(String cachePath){
+		CACHE_PATH = cachePath;
+	}
 
-	private static LruCache<String, Bitmap> caches = new LruCache<String, Bitmap>(MAX_CACHE_SIZE){
+	private static LruCache<String, Bitmap> caches = new LruCache<String, Bitmap>(
+			MAX_CACHE_SIZE) {
 
 		@Override
 		protected void entryRemoved(boolean evicted, String key,
@@ -82,12 +100,21 @@ public class ImageLoader {
 			int size = value.getRowBytes() * value.getHeight();
 			return size;
 		}
-		
+
 	};
 	private static ExecutorService mThreadPool = Executors
 			.newFixedThreadPool(THREAD_NUMS);
 
+	@SuppressWarnings("deprecation")
 	public void load(View view, final String path) {
+
+		if (placeHolderBmp != null) {
+			if (view instanceof ImageView) {
+				((ImageView) view).setImageBitmap(placeHolderBmp);
+			} else {
+				view.setBackgroundDrawable(new BitmapDrawable(placeHolderBmp));
+			}
+		}
 
 		// load from memory at first
 		Bitmap cacheBitmap = caches.get(md5(path));
@@ -96,13 +123,36 @@ public class ImageLoader {
 			ImageDownTask task = new ImageDownTask(view, path);
 			mThreadPool.execute(task);
 		} else {
-			setImage(view, cacheBitmap);
+			setImage(view, cacheBitmap, 0, null);
 		}
-		
+
 	}
-	
-	
-	public void load(View view, final String path, OnLoadProgressListener progressListener) {
+
+	@SuppressWarnings("deprecation")
+	public void load(View view, ProgressBar mProgressbar, final String path) {
+
+		if (placeHolderBmp != null) {
+			if (view instanceof ImageView) {
+				((ImageView) view).setImageBitmap(placeHolderBmp);
+			} else {
+				view.setBackgroundDrawable(new BitmapDrawable(placeHolderBmp));
+			}
+		}
+
+		// load from memory at first
+		Bitmap cacheBitmap = caches.get(md5(path));
+
+		if (cacheBitmap == null) {
+			ImageDownTask task = new ImageDownTask(view, path, mProgressbar);
+			mThreadPool.execute(task);
+		} else {
+			setImage(view, cacheBitmap, 0, mProgressbar);
+		}
+
+	}
+
+	public void load(View view, final String path,
+			OnLoadProgressListener progressListener) {
 
 		// load from memory at first
 		Bitmap cacheBitmap = caches.get(md5(path));
@@ -111,64 +161,116 @@ public class ImageLoader {
 			ImageDownTask task = new ImageDownTask(view, path, progressListener);
 			mThreadPool.execute(task);
 		} else {
-			setImage(view, cacheBitmap);
+			setImage(view, cacheBitmap, 0, null);
 		}
-		
+
 	}
-	
+
+	public void load(View view, final String path, int corner) {
+		// load from memory
+		Bitmap cacheBitmap = caches.get(md5(path));
+
+		if (cacheBitmap == null) {
+			ImageDownTask task = new ImageDownTask(view, path, corner);
+			mThreadPool.execute(task);
+		} else {
+			setImage(view, cacheBitmap, corner, null);
+		}
+	}
+
+	public void setPlaceHolderBitmap(Bitmap bmp) {
+		this.placeHolderBmp = bmp;
+	}
 
 	public Bitmap getImageFromNet(String path) {
 
-		URL url;
-		try {
-			url = new URL(path);
-			URLConnection urlConnection = url.openConnection();
-			Bitmap bitmap = BitmapFactory.decodeStream(urlConnection
-					.getInputStream());
-
-			return bitmap;
-		} catch (MalformedURLException e) {
-			e.printStackTrace();
-		} catch (IOException e) {
-			e.printStackTrace();
+		if (TextUtils.isEmpty(path)) {
+			return null;
 		}
-		return null;
 		
+		URL url = null;
+		try {
+			url = new URL(path);
+		} catch (MalformedURLException e1) {
+			e1.printStackTrace();
+			return null;
+		}
+
+		if (path.startsWith("https")) {
+			
+			try {
+				HttpsURLConnection urlConnection = (HttpsURLConnection) url.openConnection();
+				urlConnection.setConnectTimeout(TIME_OUT);
+				urlConnection.setReadTimeout(TIME_OUT);
+				Bitmap bitmap = BitmapFactory.decodeStream(urlConnection.getInputStream());
+				return bitmap;
+			} catch (IOException e) {
+				e.printStackTrace();
+			}
+
+		} else {
+			try {
+				URLConnection urlConnection = url.openConnection();
+				urlConnection.setConnectTimeout(TIME_OUT);
+				urlConnection.setReadTimeout(TIME_OUT);
+				Bitmap bitmap = BitmapFactory.decodeStream(urlConnection.getInputStream());
+
+				return bitmap;
+			} catch (MalformedURLException e) {
+				e.printStackTrace();
+			} catch (IOException e) {
+				e.printStackTrace();
+			}
+			
+		}
+		
+		return null;
 	}
-	
-	public Bitmap getImageFromNetWithProgress(String path, OnLoadProgressListener progressListener) {
+
+	public Bitmap getImageFromNetWithProgress(String path,
+			OnLoadProgressListener progressListener) {
 
 		URL url;
 		try {
 			url = new URL(path);
-			URLConnection urlConnection = url.openConnection();
-			int totalCount = urlConnection.getInputStream().available();
 			
-			InputStream inputStream = urlConnection.getInputStream();
+			InputStream inputStream;
+			int totalCount = 0;
 			
+			if(path.startsWith("https")){
+				HttpsURLConnection urlConnection = (HttpsURLConnection)url.openConnection();
+				inputStream = urlConnection.getInputStream();
+				totalCount =  urlConnection.getInputStream().available();
+			} else {
+				URLConnection urlConnection = url.openConnection();
+				inputStream = urlConnection.getInputStream();
+				totalCount = urlConnection.getInputStream().available();
+			}
+
 			byte[] array = readStream(inputStream, totalCount, progressListener);
-			Bitmap bitmap = BitmapFactory.decodeByteArray(array, 0, array.length);
-			
+			Bitmap bitmap = BitmapFactory.decodeByteArray(array, 0,
+					array.length);
+
 			return bitmap;
 		} catch (MalformedURLException e) {
 			e.printStackTrace();
 		} catch (IOException e) {
 			e.printStackTrace();
-		} catch (Exception e){
+		} catch (Exception e) {
 			e.printStackTrace();
 		}
 		return null;
-		
+
 	}
-	
 
 	public Bitmap getBitmapFromLocal(String path) {
-		
-		if(SAMPLED_FLAG){
+
+		if (SAMPLED_FLAG) {
 			return getSampledBitmap(path);
 		}
 
 		File file = new File(path);
+		
 		try {
 			FileInputStream input = new FileInputStream(file);
 			Bitmap bitmap = BitmapFactory.decodeStream(input);
@@ -208,7 +310,6 @@ public class ImageLoader {
 		return hex.toString();
 	}
 
-	
 	public void saveBitmap(Bitmap bitmap, String path, String fileName) {
 
 		if (bitmap == null || TextUtils.isEmpty(path)
@@ -224,7 +325,7 @@ public class ImageLoader {
 		try {
 			FileOutputStream output = new FileOutputStream(new File(file,
 					fileName));
-			if(CACHED_IMAGE_FORMAT.endsWith(".png")){
+			if (CACHED_IMAGE_FORMAT.endsWith(".png")) {
 				bitmap.compress(CompressFormat.PNG, 100, output);
 			} else {
 				bitmap.compress(CompressFormat.JPEG, 100, output);
@@ -243,103 +344,144 @@ public class ImageLoader {
 		private Bitmap mBitmap;
 		private String url;
 		private View view;
-		
+		private int corner;
+
+		private ProgressBar mProgressBar;
+
 		private OnLoadProgressListener mProgressListener;
 
 		public ImageDownTask(View view, String url) {
 			this.url = url;
 			this.view = view;
 		}
-		
-		public ImageDownTask(View view ,String url, OnLoadProgressListener mProgressListener){
+
+		public ImageDownTask(View view, String url, ProgressBar bar) {
+			this.url = url;
+			this.view = view;
+			this.mProgressBar = bar;
+		}
+
+		public ImageDownTask(View view, String url,
+				OnLoadProgressListener mProgressListener) {
 			this(view, url);
 			this.mProgressListener = mProgressListener;
 		}
 
+		public ImageDownTask(View view, String url, int corner) {
+			this(view, url);
+			this.corner = corner;
+
+		}
+
+		public ImageDownTask(View view, String url,
+				OnLoadProgressListener mProgressListener, int corner) {
+			this(view, url, mProgressListener);
+			this.corner = corner;
+		}
+
 		@Override
 		public void run() {
-			
+
 			// load from disk
 			File file = new File(url);
-			if(file.exists()){
+			if (file.exists()) {
 				mBitmap = getBitmapFromLocal(url);
-				caches.put(md5(url), mBitmap);
+				if(mBitmap != null){
+				 caches.put(md5(url), mBitmap);
+				}
 				Bitmap bitmap = caches.get(md5(url));
-				setImage(view, bitmap);
+				setImage(view, bitmap, corner, mProgressBar);
+
 				return;
 			}
-			
+
 			mBitmap = getBitmapFromLocal(CACHE_PATH + "/" + md5(url)
 					+ CACHED_IMAGE_FORMAT);
+
+			Log.i(TAG, " -- cache path -- : " + CACHE_PATH);
+
 			if (mBitmap != null) {
 
 				caches.put(md5(url), mBitmap);
-				setImage(view, caches.get(md5(url)));
+				setImage(view, caches.get(md5(url)), corner, mProgressBar);
 
 			} else {
-				if(mProgressListener != null){
-					mBitmap = getImageFromNetWithProgress(this.url, mProgressListener);
+				if (mProgressListener != null) {
+					mBitmap = getImageFromNetWithProgress(this.url,
+							mProgressListener);
 				} else {
 					mBitmap = getImageFromNet(this.url);
 				}
-				
+
 				if (mBitmap == null) {
+					if(mOnLoadCompleteListener != null){
+						mOnLoadCompleteListener.onLoadFailed(mProgressBar);
+					}
 					return;
 				}
 				caches.put(md5(url), mBitmap);
 				saveBitmap(mBitmap, CACHE_PATH, md5(url) + CACHED_IMAGE_FORMAT);
-				setImage(view, caches.get(md5(url)));
-				
-				if(mOnLoadCompleteListener != null)
-					mOnLoadCompleteListener.onLoadComplete();
+				setImage(view, caches.get(md5(url)), corner, mProgressBar);
+
+				if (mOnLoadCompleteListener != null)
+					mOnLoadCompleteListener.onLoadComplete(mProgressBar);
 			}
 
 		}
 	}
 
+	public String getCachePath(String url) {
+		return CACHE_PATH + "/" + md5(url) + CACHED_IMAGE_FORMAT;
+	}
+
 	@SuppressWarnings("deprecation")
-	public void setImage(final View view, final Bitmap bitmap) {
+	public void setImage(final View view, final Bitmap bitmap,
+			final int corner, final ProgressBar progressBar) {
 
 		new Handler(Looper.getMainLooper()).post(new Runnable() {
 			@Override
 			public void run() {
-				
-				if(view instanceof ImageView){
-					((ImageView)view).setImageBitmap(bitmap);
+
+				if (view instanceof ImageView) {
+					((ImageView) view).setImageBitmap(bitmap);
 				} else {
 					view.setBackgroundDrawable(new BitmapDrawable(bitmap));
 				}
-				
+
+				if (progressBar != null) {
+					progressBar.setVisibility(View.GONE);
+				}
+
 			}
 
 		});
 	}
-	
+
 	/**
-	 * <P> Generally only to the local image sampling read, 
-	 * local image is compared commonly big, some even 
-	 * more than 5M, in order to prevent the OOM need sampled
+	 * <P>
+	 * Generally only to the local image sampling read, local image is compared
+	 * commonly large, some even more than 5M, in order to prevent the OOM need
+	 * sampled
 	 * </P>
 	 * 
 	 * @param localFile
 	 * @return
 	 */
 	@SuppressWarnings("deprecation")
-	public Bitmap getSampledBitmap(String localFile){
+	public Bitmap getSampledBitmap(String localFile) {
 		
+		Log.i(TAG, "=== " + localFile);
+
 		BitmapFactory.Options newOpts = new BitmapFactory.Options();
 		newOpts.inJustDecodeBounds = true;
-		Bitmap bitmap = BitmapFactory.decodeFile(localFile, newOpts);
 		
-		if(bitmap == null){
-			return null;
-		}
+		Bitmap bitmap = BitmapFactory.decodeFile(localFile, newOpts);
 
 		newOpts.inJustDecodeBounds = false;
 		int w = newOpts.outWidth;
 		int h = newOpts.outHeight;
-		float hh = 800f;//
-		float ww = 480f;//
+		float hh = 1920f;//
+		float ww = 1080f;//
 		int be = 1;
 		if (w > h && w > ww) {
 			be = (int) (newOpts.outWidth / ww);
@@ -353,50 +495,66 @@ public class ImageLoader {
 		newOpts.inPreferredConfig = Config.ARGB_8888;
 		newOpts.inPurgeable = true;
 		newOpts.inInputShareable = true;
-		
+
 		bitmap = BitmapFactory.decodeFile(localFile, newOpts);
-		
+
 		return bitmap;
 	}
-	
-	
-	public interface OnLoadProgressListener{
+
+	public interface OnLoadProgressListener {
 		public void onLoadProgress(int progress);
 	}
-	
-	public byte[] readStream(InputStream in, int totalCount, OnLoadProgressListener mProgressListener) throws Exception {
+
+	public byte[] readStream(InputStream in, int totalCount,
+			OnLoadProgressListener mProgressListener) throws Exception {
 		ByteArrayOutputStream outputStream = new ByteArrayOutputStream();
-		
+
 		byte[] buffer = new byte[BUF_SIZE];
 		int len = -1;
 		int curByteCount = 0;
 		while ((len = in.read(buffer)) != -1) {
 			outputStream.write(buffer, 0, len);
 			curByteCount += len;
-			
-			float progressRange = (float)curByteCount / (float)totalCount * 100f;
-			mProgressListener.onLoadProgress((int)progressRange);
+
+			float progressRange = (float) curByteCount / (float) totalCount
+					* 100f;
+			if(mProgressListener != null){
+				mProgressListener.onLoadProgress((int) progressRange);
+			}
 		}
 		outputStream.close();
 		in.close();
 		return outputStream.toByteArray();
 	}
-	
-	public interface OnLoadCompleteListener{
-		public void onLoadComplete();
+
+	public interface OnLoadCompleteListener {
+		public void onLoadComplete(ProgressBar bar);
+		public void onLoadFailed(ProgressBar bar);
 	}
-	
+
 	public OnLoadCompleteListener mOnLoadCompleteListener;
-	
-	public void setOnLoadCompleteListener(OnLoadCompleteListener listener){
+
+	public void setOnLoadCompleteListener(OnLoadCompleteListener listener) {
 		this.mOnLoadCompleteListener = listener;
 	}
-	
+
 	/**
-	 *  cancel all downloading task
+	 * cancel all downloading task
 	 */
-	public void cancelTasks(){
+	public void cancelTasks() {
 		mThreadPool.shutdown();
 	}
-	
+
+	/**
+	 * clear the cache
+	 */
+	public void clearCache() {
+
+		File tmpFile = new File(CACHE_PATH);
+		final int size = tmpFile.listFiles().length;
+		final File[] fileList = tmpFile.listFiles();
+		for (int i = 0; i < size; i++) {
+			fileList[i].delete();
+		}
+	}
 }
